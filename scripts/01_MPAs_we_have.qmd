@@ -1,0 +1,1138 @@
+---
+title: "Exploring the world's Marine Protected Areas"
+author: "Juan Mayorga"
+number-sections: true
+date: today
+theme: cosmo
+format: 
+  html:
+    self-contained: true
+    code-fold: true
+    toc: true
+    toc-location: left
+---
+
+```{r, message = F, warning = F, fig.width = 10, fig.height = 10}
+library(paletteer)
+library(sf)
+library(terra)
+library(tidyverse)
+library(bigrquery)
+
+options(scipen = 999)
+
+knitr::opts_chunk$set(eval = F, warning = F, message = F, include = F, echo = F)
+
+PristineSeasR::set_ps_paths(email = "marine.data.science@ngs.org")
+
+prj_path <- file.path(ps_science_path, "projects", "prj-MPAs-to-30x30")
+
+ps_data_path <- file.path(ps_science_path, "datasets/")
+
+bq_auth(email = "marine.data.science@ngs.org")
+
+bq_connection <- dbConnect(bigquery(), project = "pristine-seas")
+
+ocean_area <- 361000000 #km2
+
+prj_crs <- "EPSG:8857" # Equal Earth projection (8857)
+```
+
+We will explore the global distribution of marine protected areas (MPAs) to calculate the existing coverage of each country's EEZ and territorial waters (\<12 nm) and estimate the number of MPAs needed to reach 30% protection of the world's oceans.
+
+To conduct this analysis, the first step is to clean, and process the existing global databases of MPAs. Our approach to define the list of MPAs to include in the analysis will largely be based on data from WDPA, complemented with the MPA guide and Protected Seas databases. Specifically, we will explore three existing distinct scenarios:
+
+1.  ALL MPAs in the WDPA database (excluding OECMs and terrestrial PAs)
+2.  Exclude from 1, MPAs that have been classified as incompatible with conservation or have minimal protection levels according to the MPA guide. Furthermore, exclude MPAs that are classified as Fisheries Management Areas by Protected Seas.
+3.  Include only MPAs that have been assessed as highly or fully protected by the MPA guide or those with LFP score of 4-5 according with Protected Seas.
+
+# EEZs
+
+```{r eez, eval = F}
+world_eez <- sf::st_read(file.path(ps_data_path, 
+                                   "marine-regions/World_EEZ_v12_20231025_gpkg/eez_v12.gpkg")) |> 
+  janitor::clean_names() |> 
+  select(mrgid, geoname, pol_type, mrgid_ter1, territory1, iso_ter1, 
+         mrgid_sov1, sovereign1, iso_sov1, mrgid_eez, area_km2) |> 
+  st_wrap_dateline() |>
+  st_transform(prj_crs)
+
+invalid_eez <- world_eez |> 
+  filter(!st_is_valid(geom))
+
+fixed_eez <- invalid_eez |> 
+  st_make_valid()
+
+broken <- fixed_eez |> 
+  filter(!st_is_valid(geom)) 
+
+world_eez <- world_eez |> 
+  filter(!mrgid %in% invalid_eez$mrgid) |> 
+  bind_rows(fixed_eez)
+
+st_write(world_eez, file.path(prj_path, "data/world_EEZs.gpkg"), append = F)
+```
+
+Exclusive Economic Zones (EEZs) boundaries were obtained from the Flanders Marine Institute (2023) Maritime Boundaries Geodatabase, version 12. The dataset includes `r nrow(world_eez)` polygons representing the EEZs of coastal countries and territories around the world. The dataset was processed using the `sf` package in R (Pebesma and Bivand 2005) to fix any invalid geometries, reproject the data to the Equal Earth projection (EPSG:8857), and calculate the area of each EEZ in square kilometers. The total area of the world’s EEZ was calculated at `r ceiling(sum(world_eez$area_km2)/10^6)` million km2 (38% of the world's ocean).
+
+# Territorial waters
+
+```{r 12nm, eval = F}
+big_islands <- st_read(file.path(prj_path, "data/raw/USGSEsriWCMC_GlobalIslands_v3/v10/globalislandsfix.gdb"), 
+                       layer = "USGSEsriWCMC_GlobalIslandsv2_BigIslands")
+
+continents <- st_read(file.path(prj_path, "data/raw/USGSEsriWCMC_GlobalIslands_v3/v10/globalislandsfix.gdb"), 
+                       layer = "USGSEsriWCMC_GlobalIslandsv2_Continents")
+
+small_islands <- st_read(file.path(prj_path, "data/raw/USGSEsriWCMC_GlobalIslands_v3/v10/globalislandsfix.gdb"), 
+                       layer = "USGSEsriWCMC_GlobalIslandsv2_SmallIslands")
+
+very_small_islands <- st_read(file.path(prj_path, "data/raw/USGSEsriWCMC_GlobalIslands_v3/v10/globalislandsfix.gdb"), 
+                       layer = "USGSEsriWCMC_GlobalIslandsv2_VerySmallIslands")
+
+land <- bind_rows(big_islands, continents, small_islands, very_small_islands)
+
+land_single <- land |> 
+  st_simplify(dTolerance = 500) |>
+  st_combine() |> 
+  st_make_valid() |> 
+  st_transform(prj_crs) |> 
+  st_make_valid()
+  
+land_12nm_buffer <- land_single |>
+  st_buffer(dist = 12*1852) |> # 12 nautical miles in meters
+  st_make_valid()
+
+world_12nm <- st_difference(land_12nm_buffer, 
+                            land_single)
+
+world_12nm |> 
+  sf::st_write(file.path(prj_path, "data/world_12nm_buffer.gpkg"), append = F)
+
+eez_territorial_waters <- world_eez |> 
+  st_intersection(world_12nm) |> 
+  mutate(area_12nm_km2 = as.numeric(st_area(geom)/10^6))
+
+st_write(eez_territorial_waters,
+         file.path(prj_path, "data/world_territorial_waters.gpkg"), append = F)
+```
+
+Territorial waters (\<12nm) boundaries were created using by buffering the global shoreline vector from Sayre et al (2019) and interesecting it with the world’s EEZs. The dataset includes `r nrow(territorial_waters)` polygons representing the territorial waters of coastal countries and territories around the world. As above, the dataset was processed using the `sf` package in R (Pebesma and Bivand 2005) to to fix any invalid geometries, reproject the data to the Equal Earth projection (EPSG:8857), and calculate the area of each EEZ in square kilometers. The total area of the world’s territorial waters was calculated at `r ceiling(sum(territorial_waters$area_12nm_km2)/10^6)` million km2 (3.8% of the world's ocean).
+
+
+## Uninhabitated/Intact coastal areas
+
+```{r, eval = F}
+IHO_EEZ <- st_read(file.path(prj_path, "data/raw/Intersect_EEZ_IHO_v4_2020/Intersect_EEZ_IHO_v4_2020.shp")) |> 
+  janitor::clean_names()
+
+is_valid <- st_is_valid(IHO_EEZ)
+
+valid <- IHO_EEZ[is_valid, ]
+
+invalid <- IHO_EEZ[!is_valid, ]
+
+invalid_fix <- invalid |> 
+  st_make_valid() |> 
+  st_simplify(dTolerance = 0.001) |> 
+  st_wrap_dateline(options = c("WRAPDATELINE=YES", "DATELINEOFFSET=179.9")) |>
+  st_transform(crs = 3857) |> 
+  st_buffer(dist = 0) |> 
+  st_transform(crs = 8857) 
+
+valid <- valid |>  
+  st_simplify(dTolerance = 0.001) |> 
+  st_wrap_dateline(options = c("WRAPDATELINE=YES", "DATELINEOFFSET=179.9")) |>
+  st_transform(crs = 3857) |> 
+  st_buffer(dist = 0) |> 
+  st_transform(crs = 8857) 
+
+IHO_EEZ_ea <- bind_rows(valid, invalid_fix)
+
+mapview::mapview(IHO_EEZ_ea,
+                 legend = TRUE,
+                 map.types = c("Esri.WorldImagery"))
+
+IHO_EEZ_ea |> 
+  select(-fid) |> 
+  st_write(file.path(prj_path, "data/IHO_EEZ_ea.gpkg"), append = F)
+```
+
+```{r, eval = F}
+IHO_EEZ_ea <- st_read(file.path(prj_path, "data/IHO_EEZ_ea.gpkg"))
+
+coastal_condition <- st_read(file.path(prj_path,
+                                       "data/raw/intact-coastal-regions/data/lss_full_chi_wo_climate_2013_q_40.shp")) |>
+  janitor::clean_names() |>
+  st_transform(crs = st_crs(IHO_EEZ_ea))
+
+
+IHO_EEZ_ea_buffer <- st_buffer(IHO_EEZ_ea, 
+                               dist = 5000) # 5k buffer to deal with misaligments
+
+points_in_polygons <- st_join(coastal_condition, 
+                              IHO_EEZ_ea_buffer, 
+                              join = st_within)
+
+average_values <- points_in_polygons %>%
+  filter(sumprop <= 1) |> 
+  group_by(fid, mrgid, marregion, mrgid_eez, iso_sov1, iso_ter1) %>%  
+  summarise(avg_sumprop = mean(sumprop, na.rm = TRUE),
+            median_sumprop = median(sumprop))
+
+IHO_EEZ_ea_with_avg_condition <- IHO_EEZ_ea %>%
+  left_join(st_drop_geometry(average_values)) 
+
+invalid <- IHO_EEZ_ea_with_avg_condition[!st_is_valid(IHO_EEZ_ea_with_avg_condition),]
+
+fixed <- st_make_valid(invalid)
+
+valid <- IHO_EEZ_ea_with_avg_condition[st_is_valid(IHO_EEZ_ea_with_avg_condition),]
+
+IHO_EEZ_ea_with_avg_condition <- bind_rows(valid, fixed)
+
+IHO_12nm_coastal_intactness <- st_intersection(IHO_EEZ_ea_with_avg_condition, world_12nm)
+
+IHO_12nm_coastal_intactness |>  
+  st_write(file.path(prj_path, "data/IHO_12nm_coastal_intactness.gpkg"), append = F)
+
+intact_12nm <- IHO_12nm_coastal_intactness |> 
+  filter(avg_sumprop >= 0.8) |> 
+  st_union() |> 
+  sf::st_sf()
+
+st_write(intact_12nm,
+         file.path(prj_path, "data/tmp/intact_12nm_single.gpkg"), append = F)
+```
+
+We excluded from the territorial waters layer the intact and remote coastal areas of the world where small coastal communities are unfeasible and large MPAs might be preferable. To do this, we calculated the average coastal intactness score for each intersection of the world's territorial waters and the International Hydrographic Organization (IHO) areas (Flanders Marine Institute (2023)). We then performed a spatial difference operation (sf::st_difference()) to remove from the territorial waters, regions with average scores \>= 0.8. The removed regions include:
+
+-   Canada's Beaufort, and Lincoln seas, and it's part of the Arctic Ocean and Northwestern Passages.
+-   Russia's part of the East Siberian, Kara, Laptev Seas, and the it's part of the Arctic Ocean.
+-   Greenland's part of the Greenland Sea and the North Atlantic Ocean.
+
+```{r}
+world_eez <- st_read(file.path(prj_path, "data/02_processed/world_EEZs.gpkg"))
+
+world_12nm <- st_read(file.path(prj_path, "data/02_processed/world_12nm_buffer.gpkg"))
+
+IHO_12nm_coastal_intactness <- st_read(file.path(prj_path, "data/02_processed/IHO_12nm_coastal_intactness.gpkg"))
+
+intact_12nm <- IHO_12nm_coastal_intactness |> 
+  filter(avg_sumprop >= 0.8) |> 
+  st_union() |> 
+  sf::st_sf()
+
+st_crs(intact_12nm) == st_crs(world_12nm)
+
+intact_12nm_buffer <- st_buffer(intact_12nm, dist = 25000)
+
+world_12nm_v2 <- st_difference(world_12nm, 
+                               intact_12nm_buffer)
+
+world_12nm_v2 <- world_12nm_v2 %>%
+  filter(st_geometry_type(.) == "GEOMETRYCOLLECTION") |> 
+  st_collection_extract(type = "POLYGON") |> 
+  st_union()
+
+st_write(world_12nm_v2,
+         file.path(prj_path, "data/02_processed/world_12nm_buffer_v2.gpkg"), append = F)
+
+eez_territorial_waters_v2 <- world_eez |> 
+  st_intersection(world_12nm_v2) |> 
+  mutate(area_12nm_km2 = as.numeric(st_area(geom)/10^6))
+
+st_write(eez_territorial_waters_v2,
+         file.path(prj_path, "data/world_territorial_waters_v2.gpkg"), append = F)
+```
+
+# MPAs
+
+## WDPA
+
+We'll use the WDPA public database made available on September 2024. 
+
+```{r wdpa_clean, eval = F}
+# Read DB
+wdpa_raw <- st_read(file.path(ps_data_path, 
+                              "WDPA_WDOECM_Sep2024_Public_all/WDPA_WDOECM_Sep2024_Public_all.gdb"), 
+                    layer = "WDPA_WDOECM_poly_Sep2024_all")
+
+# Filter out terrestrial PAs and OECMs
+
+mWDPA <- wdpa_raw |> 
+  filter(MARINE != "0", PA_DEF != "0") 
+
+########## Clean database ##########################
+
+## Fix invalid polygons
+
+invalid <- filter(mWDPA, 
+                  !st_is_valid(SHAPE)) 
+
+ross_sea <- 555624810
+
+fixed <- invalid |> 
+  filter(WDPAID != ross_sea) |> 
+  wdpar::wdpa_clean(crs = 8857)
+
+fixed_ross <- invalid |> 
+  filter(WDPAID == ross_sea) |> 
+  wdpar::wdpa_clean(crs = 8857)
+
+fixed <- bind_rows(fixed, fixed_ross)
+
+## Clean valid polygons as well
+
+valid <- filter(mWDPA, st_is_valid(SHAPE)) 
+
+valid_clean <-  wdpar::wdpa_clean(valid, crs = 8857)
+
+mWDPA_clean <- bind_rows(valid_clean, fixed)
+
+st_write(mWDPA_clean,
+         file.path(prj_path, "data/mWDPA_clean.gpkg"), append=FALSE)
+
+## Final validity checks
+
+still_invalid <- filter(mWDPA_clean, !st_is_valid(geometry)) 
+
+still_invalid_fixed <- st_make_valid(still_invalid)
+
+mWDPA_clean <- mWDPA_clean |> 
+  filter(st_is_valid(geometry)) |> 
+  bind_rows(still_invalid_fixed)
+
+last_invalids <- filter(mWDPA_clean, !st_is_valid(geometry)) 
+
+last_invalids_fixed <- st_make_valid(last_invalids)
+
+mWDPA_clean <- mWDPA_clean |> 
+  filter(st_is_valid(geometry)) |> 
+  bind_rows(last_invalids_fixed)
+
+final_invalid <- filter(mWDPA_clean, !st_is_valid(geometry)) 
+
+final_invalid_fixed <- st_make_valid(final_invalid)
+
+mWDPA_clean <- mWDPA_clean |> 
+  filter(st_is_valid(geometry)) |> 
+  bind_rows(final_invalid_fixed)
+
+## Fix Geometry collections to polygons
+
+collections_to_poly <- mWDPA_clean %>%
+  filter(st_geometry_type(.) == "GEOMETRYCOLLECTION") |> 
+  st_collection_extract(type = "POLYGON") |> 
+  group_by(across(-geometry)) %>%  # Group by all columns except geometry
+  summarise(geometry = st_union(geometry)) |> 
+  ungroup() |> 
+  mutate(AREA_KM2 = as.numeric(st_area(geometry)/10^6)) 
+
+mWDPA_clean <- mWDPA_clean %>%
+  filter(!st_geometry_type(.) == "GEOMETRYCOLLECTION") |> 
+  bind_rows(collections_to_poly)
+
+############# Replace Palau's PNMS with the correct one from Protected Seas #####
+
+protected_seas <- st_read(file.path(ps_data_path, 
+                                    "Protected-seas/Pristine Seas - Juan Mayorga",
+                                    "ProtectedSeas_NavigatorData_04112024_shp",
+                                    "ProtectedSeas_NavigatorData_04112024_shp.shp")) |> 
+  janitor::clean_names() |> 
+  st_transform(crs = st_crs(mWDPA_clean))
+
+protected_seas_info <- read_csv(file.path(ps_data_path, 
+                                    "Protected-seas/Pristine Seas - Juan Mayorga",
+                                    "ProtectedSeas_NavigatorData_Attributes_04112024.csv")) |> 
+  janitor::clean_names() |> 
+  rename(LFP_score = removal_of_marine_life_is_prohibited)
+
+correct_PMNS_poly <- protected_seas |> 
+  filter(site_id == "AIPLW3a") |> 
+  left_join(protected_seas_info)
+
+## First remove the state waters and domestic fishing zone
+
+mWDPA_clean <- mWDPA_clean |>
+  filter(!WDPAID %in% c(555645488, 555645487))
+
+## Then replace the national sanctuary with the correct polygon
+
+mWDPA_clean$geometry[mWDPA_clean$WDPAID == 555622118] <- correct_PMNS_poly$geometry
+
+mWDPA_clean$AREA_KM2[mWDPA_clean$WDPAID == 555622118] <- correct_PMNS_poly$total_area
+
+############# Clean names and remove weird ones ########################
+
+mWDPA_clean <- mWDPA_clean |> 
+  janitor::clean_names() |> 
+  rename(wdpa_id = wdpaid) |> 
+  mutate(iucn_cat = fct_relevel(iucn_cat, "Ia", "Ib", "II", "III", "IV", "V", "VI", 
+                                "Not Applicable", "Not Assigned", "Not Reported")) |> 
+  filter(wdpa_id != 555670040) |> # remove a weird sliver of papahaanaumokuakea
+  filter(!wdpa_id %in% c("309888","555512002")) # REMOVE PIPA
+
+############# Remove land and recalculate areas ########################
+
+big_islands <- st_read(file.path(prj_path, "data/raw/USGSEsriWCMC_GlobalIslands_v3/v10/globalislandsfix.gdb"), 
+                       layer = "USGSEsriWCMC_GlobalIslandsv2_BigIslands")
+
+continents <- st_read(file.path(prj_path, "data/raw/USGSEsriWCMC_GlobalIslands_v3/v10/globalislandsfix.gdb"), 
+                       layer = "USGSEsriWCMC_GlobalIslandsv2_Continents")
+
+small_islands <- st_read(file.path(prj_path, "data/raw/USGSEsriWCMC_GlobalIslands_v3/v10/globalislandsfix.gdb"), 
+                       layer = "USGSEsriWCMC_GlobalIslandsv2_SmallIslands")
+
+very_small_islands <- st_read(file.path(prj_path, "data/raw/USGSEsriWCMC_GlobalIslands_v3/v10/globalislandsfix.gdb"), 
+                       layer = "USGSEsriWCMC_GlobalIslandsv2_VerySmallIslands")
+
+land <- bind_rows(big_islands, continents, small_islands, very_small_islands)
+
+land_single <- land |> 
+  st_simplify(dTolerance = 500) |>
+  st_union() |> 
+  st_make_valid() |> 
+  st_transform(prj_crs) |> 
+  st_make_valid()
+
+st_write(land_single,
+         file.path(prj_path, "data/land.gpkg"), append = FALSE)
+
+# Crop out land and Recalculate marine areas (km2)
+
+mWDPA_marine_areas <- mWDPA_clean |> 
+  select(wdpa_id, wdpa_pid) |> 
+  st_difference(land_single) |> 
+  mutate(marine_area_km2 = as.numeric(st_area(geometry)/10^6))
+
+# Join marine areas
+
+mWDPA_clean <- mWDPA_clean |> 
+  left_join(st_drop_geometry(mWDPA_marine_areas)) |> 
+  mutate(pct_marine = round(100*marine_area_km2/area_km2, 3))
+
+##### Save final database ############################
+
+mWDPA_clean |> 
+  select(wdpa_id, wdpa_pid, name, iso3, parent_iso, status, status_yr, mang_plan, iucn_cat, area_km2, marine_area_km2, pct_marine) |> 
+  sf::st_write(file.path(prj_path, "data/mWDPA_clean_valid_fixed.gpkg"), 
+               append = FALSE)
+
+st_write(mWDPA_marine_areas,
+         file.path(prj_path, "data/mWDPA_clean_valid_fixed_no_land.gpkg"), append = FALSE)
+```
+
+```{r}
+mWDPA <- sf::read_sf(file.path(prj_path, "data/02_processed/mWDPA_clean_valid_fixed.gpkg")) |> 
+  mutate(iucn_cat = fct_relevel(iucn_cat, "Ia", "Ib", "II", "III", "IV", "V", "VI", 
+                                "Not Applicable", "Not Assigned", "Not Reported")) 
+
+wdpa_totals <- mWDPA |> 
+  st_drop_geometry() |> 
+  filter(!is.na(marine_area_km2)) |>
+  summarize(n_mpa = n_distinct(wdpa_id),
+            median_size_km2 = round(median(marine_area_km2),2),
+            avg_size_km2 = round(mean(marine_area_km2)),
+            total_area_km2 = round(sum(marine_area_km2)),
+            pct_ocean = round(100*total_area_km2/ocean_area,2)) |> 
+  ungroup() 
+```
+
+The WDPA database contains `r wdpa_totals$n_mpa` MPAs covering a total of approximately `r round(wdpa_totals$total_area_km2/10^6)` million km2, which represents `r wdpa_totals$pct_ocean`% of the world's oceans. The range of MPA sizes is quite large, with a median size of `r wdpa_totals$median_size_km2` km2 and an average size of `r wdpa_totals$avg_size_km2` km2.
+
+```{r mpas_by_iucn}
+mpas_by_iucn <- mWDPA |> 
+  st_drop_geometry() |> 
+  filter(!is.na(marine_area_km2)) |>
+  group_by(iucn_cat) |>
+  summarize(n_mpa = n_distinct(wdpa_id),
+            median_size_km2 = round(median(marine_area_km2),2),
+            avg_size_km2 = round(mean(marine_area_km2)),
+            std_size_km2 = round(sd(marine_area_km2)),
+            total_area_km2 = round(sum(marine_area_km2)),
+            frc_ocean = total_area_km2/ocean_area) |> 
+  ungroup() 
+
+mpas_by_iucn |> 
+  select(-std_size_km2) |> 
+  gt::gt(rowname_col = "iucn_cat") |> 
+  gt::fmt_percent(columns = c("frc_ocean"), decimals = 2) |> 
+  gt::fmt_number(columns = c("total_area_km2", "avg_size_km2"), decimals = 0) |> 
+  gt::fmt_number(columns = c("median_size_km2"), decimals = 2) |> 
+  gt::cols_label("n_mpa" ~ "Number of MPAs",
+                 "total_area_km2" ~ "Total area (km2)",
+                 "avg_size_km2" ~ "Average size (km2)",
+                 "median_size_km2" ~ "Median size (km2)",
+                 "frc_ocean" ~ "Percent of the ocean") |> 
+  gt::tab_header(title = "MPAs by IUCN category",
+                 subtitle = "Summary of the number and size of MPAs by IUCN category") 
+```
+
+```{r}
+iucn_labels_count <- mpas_by_iucn |> 
+                     mutate(label = paste0(iucn_cat, " (", n_mpa, ")")) |> 
+                     select(iucn_cat, label) |> 
+                     deframe()
+
+mWDPA |> 
+  st_drop_geometry() |> 
+  filter(!is.na(marine_area_km2)) |>
+  ggplot()+
+  geom_boxplot(aes(x = iucn_cat, y = marine_area_km2))+
+  scale_y_continuous(transform = "log10", breaks = c(0,.1,1,10,100,1000,100000))+
+  #coord_flip()+
+  scale_x_discrete(labels = iucn_labels_count)+
+  ggtitle("Distribution of MPA sizes by IUCN category")+
+  ggthemes::theme_hc()+
+  labs(x = "", y = "MPA size (km2)")+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+```{r}
+mWDPA |> 
+  st_drop_geometry() |> 
+  mutate(size_bin = cut(marine_area_km2, 
+                        breaks = c(0, 0.001, 0.01, 0.1, 0.5, 1, 10, 100, 1000, 10000, 100000,Inf))) |> 
+  group_by(size_bin) |> 
+  summarize(n_mpa = n_distinct(wdpa_id),
+            pct_mpas = 100*n_mpa/nrow(st_drop_geometry(mWDPA)), 
+            median_size = median(marine_area_km2),
+            avg_size = mean(marine_area_km2),
+            std_size = sd(marine_area_km2),
+            protected_area_km2 = sum(marine_area_km2),
+            pct_ocean = 100*protected_area_km2/ocean_area) |> 
+  ungroup() |> 
+  mutate_if(is.numeric, round, 2)
+```
+
+Using the MPA guide and Protected Seas databases we will identify and exclude from the analysis areas that have been classified as incompatible with conservation (MPA guide) or those are actually not MPAs upon closer examination (Protected Seas).
+
+## MPA Guide Assessments
+
+The MPA guide is science-based framework to identify MPA's Stage of Establishment and Level of Protection, which are linked to expected conservation outcomes. Not all of the world's MPAs have been assessed using this framework but to date, \>90% of the world's protected area represented in 767 zones have been assessed. We can use this framework to exclude areas that have been assessed as incompatible with conservation or 2) having minimal protection levels.
+
+```{r}
+mpa_guide <- st_read(file.path(ps_data_path, 
+                               "mpa-atlas/MPA guide assessments - March 2024",
+                               "March_24_zoneassessment_summary.gdb")) |> 
+  naniar::replace_with_na(replace = list(wdpa_pid = "None")) |> 
+  rename(area_km2 = zone_area_calc, 
+         mpa_guide_lvl = protection_mpaguide_level) |> 
+  filter(mpa_guide_lvl != "unknown",
+         !is.na(wdpa_id),
+         !is.na(area_km2),
+         area_km2 > 0) |> 
+  st_transform(crs = crs(mWDPA)) 
+
+mpa_guide_info <- mpa_guide |> 
+  st_drop_geometry()
+```
+
+The database shared with us on March 2024, contains a total of `r nrow(mpa_guide_info)` MPA areas with assessments and WDPA ID. A summary of the number of MPAs and total area by protection category and establishment level is shown below.
+
+```{r mpa_guide}
+library(gt)
+
+mpa_guide_info |> 
+  mutate(mpa_guide_lvl = fct_relevel(mpa_guide_lvl, 
+                                     "full", "high", "light", "minimal", "incompatible")) |>
+  group_by(mpa_guide_lvl) |> 
+  summarize(n_mpas = n_distinct(wdpa_id),
+            avg_size = mean(area_km2, na.rm = T),
+            median_size = median(area_km2, na.rm = T),
+            area_km2 = sum(area_km2),
+            frac_ocean = area_km2/ocean_area) |> 
+  gt(rowname_col = "mpa_guide_lvl") |> 
+  fmt_percent(contains("frac"), decimals = 2) |> 
+  fmt_number(contains("_") & !contains("frac"), decimals = 0) |> 
+  cols_label("n_mpas" ~ "# MPAs",
+             "avg_size" ~ "Mean size (km2)",
+             "median_size" ~ "Median size (km2)",
+             "area_km2" ~ "Total area (km2)",
+             "frac_ocean" ~ "Percent of the ocean",
+             "mpa_guide_lvl" ~ "MPG guide level") |> 
+  # add title and subtitle
+  gt::tab_header(title = "Number and area of MPAs by protection level")
+
+mpa_guide_info |> 
+  mutate(mpa_guide_lvl = fct_relevel(mpa_guide_lvl, "full", "high", "light", "minimal", "incompatible")) |>
+  group_by(establishment_stage) |> 
+  summarize(n_mpas = n_distinct(wdpa_id),
+            avg_size = mean(area_km2),
+            median_size = median(area_km2),
+            area_km2 = sum(area_km2),
+            frac_ocean = area_km2/ocean_area) |> 
+  gt(rowname_col = "mpa_guide_lvls") |> 
+  fmt_percent(contains("frac"), decimals = 2) |> 
+  fmt_number(contains("_") & !contains("frac"), decimals = 0) |> 
+  cols_label("n_mpas" ~ "# MPAs",
+             "avg_size" ~ "Mean size (km2)",
+             "median_size" ~ "Median size (km2)",
+             "area_km2" ~ "Total area (km2)",
+             "frac_ocean" ~ "Percent of the ocean",
+             "establishment_stage" ~ "Establishment stage") |> 
+  # add title and subtitle
+  gt::tab_header(title = "Number and area of MPAs by establishment stage")
+```
+
+Using the WDPA id and WPDA pid fields, we can merge the MPA guide data with the WDPA data to assign a protection level to each MPA in the WDPA database.
+
+```{r}
+# Summarize assessment by WDPA ID, in some cases a single MPA will have multiple zones with different assessment results. 
+
+assessed_wdpa_ids <- mpa_guide_info |> 
+  group_by(wdpa_id, mpa_guide_lvl, establishment_stage) |> 
+  summarize(area_km2 = sum(area_km2, na.rm = T)) |> 
+  ungroup() |> 
+  group_by(wdpa_id) |> 
+  summarize(n_lvls = n_distinct(mpa_guide_lvl),
+            mpa_guide_lvls = paste(mpa_guide_lvl, collapse = "/"),
+            best_lvls = mpa_guide_lvl[which.max(area_km2)],
+            est_stage = establishment_stage[which.max(area_km2)],
+            area_km2 = sum(area_km2, na.rm = T)) |> 
+  ungroup() |> 
+  mutate_if(is.numeric, round, 2)
+
+# Now we'll summarize by WDPA ID and WDPA PID
+
+assessed_wdpa_pids <- mpa_guide_info |> 
+  group_by(wdpa_id, wdpa_pid, mpa_guide_lvl, establishment_stage) |> 
+  summarize(area_km2 = sum(area_km2, na.rm = T)) |> 
+  ungroup() |> 
+  group_by(wdpa_id, wdpa_pid) |> 
+  summarize(n_lvls = n_distinct(mpa_guide_lvl),
+            mpa_guide_lvls = paste(mpa_guide_lvl, collapse = "/"),
+            best_lvls = mpa_guide_lvl[which.max(area_km2)],
+            est_stage = establishment_stage[which.max(area_km2)],
+            area_km2 = sum(area_km2, na.rm = T)) |> 
+  ungroup() |> 
+  mutate_if(is.numeric, round, 2)
+
+# Now we'll merge the MPA guide data with the WDPA data
+
+mWDPA_with_info <- mWDPA |> 
+  left_join(assessed_wdpa_pids |> 
+              filter(n_lvls == 1 | 
+                       mpa_guide_lvls %in% c("full/high", "incompatible/light", 
+                                             "light/minimal", "incompatible/minimal")) |> 
+              select(wdpa_id, wdpa_pid, mpa_guide_lvls, est_stage),
+            by = c("wdpa_id","wdpa_pid")) |> 
+  left_join(assessed_wdpa_ids |> 
+              filter(n_lvls == 1 | 
+                       mpa_guide_lvls %in% c("full/high", "incompatible/light", 
+                                             "light/minimal", "incompatible/minimal")) |>
+              distinct(wdpa_id, mpa_guide_lvls_2 = mpa_guide_lvls, est_stage_2 = est_stage),
+            by = c("wdpa_id")) |> 
+  mutate(mpa_guide_lvls = coalesce(mpa_guide_lvls, mpa_guide_lvls_2),
+         est_stage = coalesce(est_stage, est_stage_2)) |> 
+  select(-mpa_guide_lvls_2, -est_stage_2) 
+
+# Let's clean up categories too
+
+mWDPA_with_info <- mWDPA_with_info |> 
+  mutate(mpa_guide_lvls = case_when(mpa_guide_lvls %in% c("incompatible/minimal",
+                                                          "incompatible/light") ~ "incompatible",
+                                    mpa_guide_lvls %in% c("full/high") ~ "high",
+                                    mpa_guide_lvls %in% c("light/minimal") ~ "minimal",
+                                    TRUE ~ mpa_guide_lvls))
+
+mWDPA_info <- st_drop_geometry(mWDPA_with_info)
+```
+
+We are able to assign a protection level to `r sum(!is.na(mWDPA_info$mpa_guide_lvls))` MPAs in the WDPA database, representing a total area of `r round(sum(mWDPA_info$marine_area_km2[!is.na(mWDPA_info$mpa_guide_lvls)], na.rm = T)/10^6)` million km2 (`r round(100*sum(mWDPA_info$marine_area_km2[!is.na(mWDPA_info$mpa_guide_lvls)], na.rm = T)/ocean_area, 2)` % of the Ocean). The summary of these MPAs by protection level and establishment stage is shown below.
+
+```{r}
+library(gt)
+
+mWDPA_info |> 
+  mutate(mpa_guide_lvls = fct_relevel(mpa_guide_lvls, "full", "high", "light", "minimal", "incompatible")) |>
+  group_by(mpa_guide_lvls) |> 
+  summarize(n_mpas = n_distinct(wdpa_id),
+            avg_size = mean(area_km2),
+            median_size = median(area_km2),
+            area_km2 = sum(area_km2),
+            frac_ocean = area_km2/ocean_area) |> 
+  gt(rowname_col = "mpa_guide_lvls") |> 
+  fmt_percent(contains("frac"), decimals = 2) |> 
+  fmt_number(contains("_") & !contains("frac"), decimals = 0) |> 
+    cols_label("n_mpas" ~ "# MPAs",
+             "avg_size" ~ "Mean size (km2)",
+             "median_size" ~ "Median size (km2)",
+             "area_km2" ~ "Total area (km2)",
+             "frac_ocean" ~ "Percent of the ocean",
+             "mpa_guide_lvls" ~ "MPG guide levels") |> 
+    # add title and subtitle
+  gt::tab_header(title = "Number and area of MPAs by protection level")
+
+mWDPA_info |> 
+  group_by(est_stage) |> 
+  summarize(n_mpas = n_distinct(wdpa_id),
+            avg_size = mean(area_km2),
+            median_size = median(area_km2),
+            area_km2 = sum(area_km2),
+            frac_ocean = area_km2/ocean_area) |> 
+  gt(rowname_col = "mpa_guide_lvls") |> 
+  fmt_percent(contains("frac"), decimals = 2) |> 
+  fmt_number(contains("_") & !contains("frac"), decimals = 0) |> 
+    cols_label("n_mpas" ~ "# MPAs",
+             "avg_size" ~ "Mean size (km2)",
+             "median_size" ~ "Median size (km2)",
+             "area_km2" ~ "Total area (km2)",
+             "frac_ocean" ~ "Percent of the ocean",
+             "est_stage" ~ "Establishment stage") |> 
+    # add title and subtitle
+  gt::tab_header(title = "Number and area of MPAs by establishment stage")
+```
+
+Notably, a large number of areas in the MPA Guide database (`r length(unique(mWDPA_info$wdpa_id[mWDPA_info$mpa_guide_lvls == "incompatible"]))`) representing `r round(100*sum(mWDPA_info$area_km2[mWDPA_info$mpa_guide_lvls == "incompatible"], na.rm = T)/ocean_area,2)` % of the ocean, have been considered incompatible with conservation. Let's explore these further.
+
+```{r}
+incompatible_mpa_guide <- mpa_guide |> 
+  filter(mpa_guide_lvl %in% c("incompatible"))
+
+mapview::mapview(incompatible_mpa_guide,
+                 zcol = c(area = "mpa_guide_lvl"), 
+                 legend = TRUE,
+                 map.types = c("Esri.WorldImagery"),
+                 layer.name = "Incompatible with conservation")
+```
+
+```{r}
+incompatible_mpa_guide |> 
+  st_drop_geometry() |> 
+  group_by(country) |> 
+  summarize(n = n_distinct(wdpa_pid),
+            area = round(sum(area_km2, na.rm = T),2)) |> 
+  arrange(desc(area)) |> 
+  gt::gt() |> 
+  gt::cols_label("n" ~ "Number of MPAs",
+                 "area" ~ "Total area (km2)") |> 
+  gt::tab_header(title = "MPAs classified as incompatible",
+                 subtitle = "Summary of the number and area of MPAs classified as incompatible with conservation by country")
+```
+
+### EU
+
+A recent paper by Aminian et al. (2024) provides a guide to assess the level of protection of MPAs in the European Union. We will use this guide to assign protection levels to EU MPAs in the WDPA database.
+
+```{r}
+eu_mpa_guide <- readxl::read_xlsx(file.path(ps_data_path, "EU-MPAGuide-Aminian_et_al/MPAlist.xlsx")) |> 
+  select(wdpa_id = WDPAID, PL_optimist = PLallactivities_optimist, PL_pessimist = PLallactivities_pessimist, country = Country) |> 
+  filter(!is.na(wdpa_id)) |> 
+  distinct() 
+  
+dupes <- eu_mpa_guide |> 
+  janitor::get_dupes(wdpa_id)
+
+eu_mpa_guide <- eu_mpa_guide |> 
+  anti_join(dupes |> 
+              select(wdpa_id)) 
+
+eu_mpa_guide <- eu_mpa_guide |> 
+  mutate(wdpa_id = str_trim(wdpa_id)) |>
+  separate_longer_delim(c(wdpa_id), delim = ",") |> 
+  mutate(wdpa_id = str_trim(wdpa_id)) |>
+  distinct() |> 
+  mutate(wdpa_id_m = as.numeric(wdpa_id)) |> 
+  filter(!is.na(wdpa_id_m))
+  
+dupes <- eu_mpa_guide |> 
+  janitor::get_dupes(wdpa_id)
+
+eu_mpa_guide <- eu_mpa_guide |> 
+  anti_join(dupes |> 
+              select(wdpa_id))  
+
+mWDPA_with_info <- mWDPA_with_info |> 
+  left_join(eu_mpa_guide |> 
+              select(wdpa_id_m, PL_optimist, PL_pessimist), 
+            by = c("wdpa_id" = "wdpa_id_m")) |> 
+  mutate(mpa_guide_lvls = coalesce(mpa_guide_lvls, PL_optimist)) |> 
+  select(-PL_optimist, -PL_pessimist) |> 
+  mutate(mpa_guide_lvls = str_to_lower(mpa_guide_lvls),
+         mpa_guide_lvls = str_remove_all(mpa_guide_lvls, "ly"),
+         mpa_guide_lvls = case_when(mpa_guide_lvls == "ful" ~ "full",
+                                    mpa_guide_lvls == "unclassified" ~ NA_character_,
+                                    TRUE ~ mpa_guide_lvls)) 
+
+mWDPA_info <- st_drop_geometry(mWDPA_with_info)
+```
+
+After joining the EU datset, we are now able to assign a protection level to `r sum(!is.na(mWDPA_info$mpa_guide_lvls))` MPAs in the WDPA database, representing a total area of `r round(sum(mWDPA_info$marine_area_km2[!is.na(mWDPA_info$mpa_guide_lvls)], na.rm = T)/10^6)` million km2 (`r round(100*sum(mWDPA_info$marine_area_km2[!is.na(mWDPA_info$mpa_guide_lvls)], na.rm = T)/ocean_area, 2)` % of the Ocean). The summary of these MPAs by protection level and establishment stage is shown below.
+
+```{r}
+library(gt)
+
+mWDPA_info |> 
+  mutate(mpa_guide_lvls = fct_relevel(mpa_guide_lvls, "full", "high", "light", "minimal", "incompatible")) |>
+  group_by(mpa_guide_lvls) |> 
+  summarize(n_mpas = n_distinct(wdpa_id),
+            avg_size = mean(area_km2),
+            median_size = median(area_km2),
+            area_km2 = sum(area_km2),
+            frac_ocean = area_km2/ocean_area) |> 
+  gt(rowname_col = "mpa_guide_lvls") |> 
+  fmt_percent(contains("frac"), decimals = 2) |> 
+  fmt_number(contains("_") & !contains("frac"), decimals = 0) |> 
+    cols_label("n_mpas" ~ "# MPAs",
+             "avg_size" ~ "Mean size (km2)",
+             "median_size" ~ "Median size (km2)",
+             "area_km2" ~ "Total area (km2)",
+             "frac_ocean" ~ "Percent of the ocean",
+             "mpa_guide_lvls" ~ "MPG guide levels") |> 
+    # add title and subtitle
+  gt::tab_header(title = "Number and area of MPAs by protection level")
+```
+
+```{r}
+mWDPA_info |> 
+  filter(iso3 == "ESP") |> 
+  group_by(mpa_guide_lvls) |> 
+  summarize(n_distinct(wdpa_id),
+            marine_area_km2 = sum(marine_area_km2, na.rm = T)) |> 
+  mutate(pct_area = 100*marine_area_km2/sum(marine_area_km2)) |> 
+  mutate_if(is.numeric, round, 2)
+```
+
+## Protected Seas
+
+Protected seas is another reliable source of information to determine the level of protection areas around the ocean (not exclusively MPAs). Additionally, it contains information about the type of area (e.g., Fisheries Management Area, No-Take Zone, etc.) and it's cross referenced with the WDPA database. We will use this database to exclude areas that are classified as Fisheries Management Areas and other non MPAs categories.
+
+```{r}
+protected_seas_info <- read_csv(file.path(ps_data_path, 
+                                    "Protected-seas/Pristine Seas - Juan Mayorga",
+                                    "ProtectedSeas_NavigatorData_Attributes_04112024.csv")) |> 
+  janitor::clean_names() |> 
+  rename(LFP_score = removal_of_marine_life_is_prohibited)
+
+protected_seas <- st_read(file.path(ps_data_path, 
+                                    "Protected-seas/Pristine Seas - Juan Mayorga",
+                                    "ProtectedSeas_NavigatorData_04112024_shp",
+                                    "ProtectedSeas_NavigatorData_04112024_shp.shp")) |> 
+  janitor::clean_names() 
+
+# Only areas that match on the WDPA database
+
+protected_seas_with_wdpa_info <- protected_seas_info |> 
+  filter(!is.na(wdpa_id), wdpa_id != 0, !is.na(LFP_score)) |> 
+  select(category_name, site_name, site_id, wdpa_id, LFP_score) |> 
+  separate_longer_delim(wdpa_id, delim = ";") |> 
+  mutate(wdpa_id = str_trim(wdpa_id),
+         wdpa_pid = wdpa_id) |> 
+  filter(wdpa_id != "") |> 
+  filter(wdpa_id %in% mWDPA_with_info$wdpa_id) |> # Important
+  distinct(wdpa_id, wdpa_pid, category_name, LFP_score) 
+
+dupes <- protected_seas_with_wdpa_info |> 
+  distinct(wdpa_id, wdpa_pid, category_name, LFP_score) |> 
+  janitor::get_dupes(wdpa_pid)
+
+protected_seas_with_wdpa_info <- protected_seas_with_wdpa_info |> 
+  anti_join(dupes) 
+
+mWDPA_with_info <- mWDPA_with_info |> 
+  mutate(wdpa_id = as.character(wdpa_id)) |> 
+  left_join(protected_seas_with_wdpa_info |> 
+              distinct(wdpa_id, wdpa_pid, LFP_score, category_name)) 
+
+### Summary tables by score and category ####
+
+mWDPA_with_info |> 
+  st_drop_geometry() |> 
+  group_by(LFP_score) |> 
+  summarise(n_areas = n_distinct(wdpa_id),
+            total_area = sum(area_km2, na.rm = T),
+            frac_ocean = total_area/ocean_area) |> 
+  gt::gt() |> 
+  fmt_percent(contains("frac_ocean"), decimals = 2) |> 
+  fmt_number(contains("_") & !contains("frac"), decimals = 0) |> 
+  gt::cols_label("LFP_score" ~ "LFP score",
+                 "n_areas" ~ "Number of MPAs",
+                 "total_area" ~ "Total area (km2)",
+                 "frac_ocean" ~ "% Ocean") |> 
+  gt::tab_header(title = "MPAs by fishing protection",
+                 subtitle = "Summary of the number and area of MPAs by fishing protection level (LFP) from Protected Seas")
+
+mWDPA_with_info |> 
+  st_drop_geometry()  |> 
+  group_by(category_name) |> 
+  summarise(n_areas = n_distinct(wdpa_id),
+            total_area = sum(area_km2, na.rm = T),
+            frac_ocean = total_area/ocean_area) |> 
+  gt::gt() |> 
+  fmt_percent(contains("frac_ocean"), decimals = 2) |> 
+  fmt_number(contains("_") & !contains("frac"), decimals = 0) |> 
+  gt::cols_label("category_name" ~ "Category",
+                 "n_areas" ~ "Number of MPAs",
+                 "total_area" ~ "Total area (km2)",
+                 "frac_ocean" ~ "% Ocean") |> 
+  gt::tab_header(title = "MPAs by category",
+                 subtitle = "Summary of the number and area of MPAs by category according to Protected Seas")
+```
+
+Most of our areas are classfied as MPAs or are NAs, but there are some areas that are classified as Fisheries Management Areas, OCEM, ect. 
+
+```{r}
+not_mpas <- mWDPA_with_info |> 
+  filter(!(category_name == "IUCN MPA" | is.na(category_name))) |> 
+  arrange(desc(area_km2))
+
+mapview::mapview(not_mpas,
+                 zcol = c(area = "category_name"), 
+                 legend = TRUE,
+                 col.regions = paletteer_d("NineteenEightyR::miami2", direction = -1),
+                 map.types = c("Esri.WorldImagery"),
+                 layer.name = "Not MPAs according to Protected Seas",
+                 popup = leafpop::popupTable(not_mpas,
+                                             zcol = c("name",
+                                                      "category_name",
+                                                      "iso3")))
+
+not_mpas |> 
+  st_drop_geometry() |> 
+  group_by(iso3) |> 
+  summarize(n = n_distinct(wdpa_pid),
+            area = round(sum(marine_area_km2, na.rm = T),2)) |> 
+  arrange(desc(area)) |> 
+  gt::gt() |> 
+  gt::cols_label("n" ~ "Number of MPAs",
+                 "area" ~ "Total area (km2)") |> 
+  gt::tab_header(title = "MPAs classified as incompatible",
+                 subtitle = "Summary of the number and area of MPAs classified as incompatible with conservation by country")
+```
+
+```{r}
+mWDPA_with_info |>
+  st_write(file.path(prj_path, "data/02_processed/mWDPA_clean_valid_fixed_with_assessments.gpkg"), 
+           append = FALSE)
+```
+
+# Layers
+
+## 1. All protection
+
+We will filter out those MPAs for which the marine portion represents less than 0.1% of the total area or have NA marine area. The latter means it does not have a marine portion according to our spatial analysis.
+
+```{r scenario1}
+bad_slivers <- c("555624872", "555786559", "555537003", "555518035", "555787975", "555539598", "555512236", "555557154", "555583031", "555635560", "555757177", "555787507", "555556934", "555787637")
+  
+mWDPA_with_info <- st_read(file.path(prj_path, "data/02_processed/mWDPA_clean_valid_fixed_with_assessments.gpkg"))
+
+# Remove all polygons with NA marine area and less than 0.1% marine area
+
+mWDPA_scenario1 <- mWDPA_with_info |> 
+  filter(!is.na(marine_area_km2) & pct_marine > 1 & marine_area_km2 > 0.001) |> 
+  filter(wdpa_id != bad_slivers) # bad sliver
+
+mWDPA_scenario1_info <- st_drop_geometry(mWDPA_scenario1)
+
+mWDPA_scenario1_totals <- mWDPA_scenario1 |> 
+  st_drop_geometry() |> 
+  filter(!is.na(marine_area_km2)) |>
+  summarize(n_mpa = n_distinct(wdpa_id),
+            median_size_km2 = round(median(marine_area_km2),2),
+            avg_size_km2 = round(mean(marine_area_km2)),
+            total_area_km2 = round(sum(marine_area_km2)),
+            pct_ocean = round(100*total_area_km2/ocean_area,2)) |> 
+  ungroup()
+
+mWDPA_scenario1 |> 
+  sf::st_write(file.path(prj_path, "data/02_processed/mWDPA_scenario_1.gpkg"), 
+               append = FALSE)
+
+mWDPA_scenario1_poly <- mWDPA_scenario1 |>
+  st_simplify(dTolerance = 100) |> 
+  st_union() |> 
+  st_make_valid() |> 
+  st_buffer(dist = 0)
+
+st_write(mWDPA_scenario1_poly,
+         file.path(prj_path, "data/02_processed/s1_protected_poly.gpkg"), append = F)
+```
+
+The resulting database contains `r mWDPA_scenario1_totals$n_mpa` MPAs covering a total of approximately `r round(mWDPA_scenario1_totals$total_area_km2/10^6)` million km2, which represents `r mWDPA_scenario1_totals$pct_ocean`% of the world's oceans. The range of MPA sizes is quite large, with a median size of `r mWDPA_scenario1_totals$median_size_km2` km2 and an average size of `r mWDPA_scenario1_totals$avg_size_km2` km2.
+
+## 2. Exclude incompatible areas
+
+We will filter out those ares that were classified at incompatible. To do this properly we will 1) filter out those WDPA IDs that matched to areas classified as incompatible with conservation by the MPA guide, and 2) spatially remove areas (`st_difference`) that are classified as incompatible. The latter part of the approach ensures we also remove portions of MPAs that are classified as incompatible.
+
+```{r}
+slivers_to_rm <- c("555545790","555560485", "555786434", "555638665", "555638666", "555517780", "555537240", "400012", "555624872")
+
+mWDPA_scenario2 <- mWDPA_with_info |> 
+  filter(!is.na(marine_area_km2) & pct_marine > 1 & marine_area_km2 > 0.001) |> 
+  filter(!mpa_guide_lvls %in% c("incompatible")) |> 
+  st_difference(st_union(incompatible_mpa_guide)) |> 
+  mutate(marine_area_km2 = as.numeric(st_area(geom)/10^6)) |> 
+  filter(wdpa_id != 555599922) |> # Remove St Helena MPA
+  filter(!wdpa_id %in% slivers_to_rm) |> 
+  filter(marine_area_km2 > 0.001)
+
+mWDPA_scenario2_info <- st_drop_geometry(mWDPA_scenario2)
+```
+
+After excluding the areas classified as incompatible with conservation (n = `r length(unique(mpa_guide_info$wdpa_id[mpa_guide_info$mpa_guide_lvl %in% c("incompatible")]))`) we are left with `r n_distinct(mWDPA_scenario2_info$wdpa_pid)` MPAs covering `r round(sum(mWDPA_scenario2_info$marine_area_km2)/10^6)` million km2, representing `r round(100*sum(mWDPA_scenario2_info$marine_area_km2)/ocean_area, 2)`% of the world's ocean.
+
+```{r}
+mWDPA_scenario2 <- mWDPA_scenario2 |> 
+  filter(category_name == "IUCN MPA" | is.na(category_name))
+
+mWDPA_scenario2_totals <- mWDPA_scenario2 |> 
+  st_drop_geometry() |> 
+  filter(!is.na(marine_area_km2)) |>
+  summarize(n_mpa = n_distinct(wdpa_id),
+            median_size_km2 = round(median(marine_area_km2),2),
+            avg_size_km2 = round(mean(marine_area_km2)),
+            total_area_km2 = round(sum(marine_area_km2)),
+            pct_ocean = round(100*total_area_km2/ocean_area,2)) |> 
+  ungroup()
+
+mWDPA_scenario2 |> 
+  sf::st_write(file.path(prj_path, "data/02_processed/mWDPA_scenario_2.gpkg"), 
+               append = FALSE)
+
+mWDPA_scenario2_poly <- mWDPA_scenario2 |>
+  st_simplify(dTolerance = 100) |> 
+  st_union() |> 
+  st_make_valid() |> 
+  st_buffer(dist = 0)
+
+st_write(mWDPA_scenario2_poly,
+         file.path(prj_path, "data/02_processed/s2_protected_poly.gpkg"), append = F)
+```
+
+After excluding the `r nrow(not_mpas)` areas that were not classified as MPAs by Protected Seas, we are left with `r n_distinct(mWDPA_scenario2$wdpa_pid)` MPAs covering `r round(sum(mWDPA_scenario2$marine_area_km2)/10^6)` million km2, representing `r round(100*sum(mWDPA_scenario2$marine_area_km2)/ocean_area, 2)`% of the world's ocean. 
+
+```{r }
+st_drop_geometry(mWDPA_scenario2) |> 
+  group_by(LFP_score) |> 
+  summarise(n_areas = n_distinct(wdpa_id),
+            total_area = sum(area_km2, na.rm = T),
+            frac_ocean = total_area/ocean_area) |> 
+  gt::gt() |> 
+  gt::fmt_percent(contains("frac_ocean"), decimals = 2) |> 
+  gt::fmt_number(contains("_") & !contains("frac"), decimals = 0) |> 
+  gt::cols_label("LFP_score" ~ "Score",
+                 "n_areas" ~ "Number of MPAs",
+                 "total_area" ~ "Total area (km2)",
+                 "frac_ocean" ~ "% Ocean") |> 
+  gt::tab_header(title = "MPAs by protection level",
+                 subtitle = "Summary of the number and area of MPAs by protection level - Scenario 2")
+```
+
+## 3. Most effective protection
+
+For this last scenario, we will include only MPAs that have been assessed as highly or fully protected by the MPA guide or those with LFP score of 4-5 according with Protected Seas.
+
+```{r}
+expert_fully_highly <- c("Ascension" = "555651558")
+
+mWDPA_scenario_3 <- mWDPA_scenario2 |> 
+  filter(mpa_guide_lvls %in% c("full", "high") | LFP_score %in% c(4,5) | wdpa_id %in% c(expert_fully_highly)) |> 
+  filter(!wdpa_id %in% c("309888","555512002")) |>  # Remove PIPA
+  st_difference(st_union(incompatible_mpa_guide)) |> 
+  mutate(marine_area_km2 = as.numeric(st_area(geom)/10^6))
+
+mWDPA_scenario3_totals <- mWDPA_scenario_3 |> 
+  st_drop_geometry() |> 
+  filter(!is.na(marine_area_km2)) |>
+  summarize(n_mpa = n_distinct(wdpa_id),
+            median_size_km2 = round(median(marine_area_km2),2),
+            avg_size_km2 = round(mean(marine_area_km2)),
+            total_area_km2 = round(sum(marine_area_km2)),
+            pct_ocean = round(100*total_area_km2/ocean_area,2)) |> 
+  ungroup()
+
+mapview::mapview(mWDPA_scenario_3,
+                 zcol = c(area = "category_name"), 
+                 legend = TRUE,
+                 col.regions = paletteer_d("NineteenEightyR::miami2", direction = -1),
+                 map.types = c("Esri.WorldImagery"),
+                 layer.name = "Not MPAs according to Protected Seas",
+                 popup = leafpop::popupTable(mWDPA_scenario_3,
+                                             zcol = c("name",
+                                                      "category_name",
+                                                      "iso3")))
+
+mWDPA_scenario_3 |> 
+  sf::st_write(file.path(prj_path, "data/02_processed/mWDPA_scenario_3.gpkg"), 
+               append = FALSE)
+
+mWDPA_scenario3_poly <- mWDPA_scenario_3 |>
+  st_simplify(dTolerance = 100) |> 
+  st_union() |> 
+  st_make_valid() |> 
+  st_buffer(dist = 0)
+
+st_write(mWDPA_scenario3_poly,
+         file.path(prj_path, "data/02_processed/s3_protected_poly.gpkg"), append = F)
+```
+
+In this most strict scenario, we are left with `r n_distinct(mWDPA_scenario_3$wdpa_pid)` MPAs covering `r round(sum(mWDPA_scenario_3$marine_area_km2)/10^6)` million km2, representing `r round(100*sum(mWDPA_scenario_3$marine_area_km2)/ocean_area, 2)`% of the world's ocean.
+
+```{r}
+bind_rows(mWDPA_scenario1_totals,
+          mWDPA_scenario2_totals,
+          mWDPA_scenario3_totals) |> 
+  mutate(scenario = c("Scenario 1", "Scenario 2", "Scenario 3")) |> 
+  select(scenario, everything())  |> 
+  write_csv(file.path(prj_path, "data/03_output/scenarios_summary.csv"))
+```
+
+## 4. PS MPAs
+
+```{r}
+wdpa_PS_mpas <- c("Isla del Coco" = "170", 
+                  "Sala y Gomez" = "555790084",
+                  "Pitcairn" = "555624172",
+                  "Gabon" = "555624884",
+                  "Nazca-Desventuradss" = "555790085",
+                  "Franz Josef Land" = "555714472",
+                  "Palau" = "555622118",
+                  "Selvagens" = "555738625",
+                  "Aldabra" = "555643548",
+                  "Clipperton" = "555597299",
+                  "Revillagigedo" = "555629385",
+                  "Niue" = "555705568",
+                  "Tristan da Cunha" = "555720256",
+                  "Diego Ramirez" = "555786069",
+                  "Juan Fernandez" = "555786068",
+                  "Ascension" = "555651558",
+                  "Yaganes" = "555643567",
+                  "Burwood" = "555643564",
+                  "Burwood" = "555643565",
+                  "Malpelo" = "303552",
+                  "Colinas y Lomas" = "555783022",
+                  "Islas Marias" = "306809",
+                  "Ross Sea" = "555624810",
+                  "PRIMNM" = "400011")
+
+
+slimpa <- st_read(file.path(prj_path, "data/raw/SLIMPA.gpkg")) |> 
+  mutate(name = "Southern Line Islands Marine Protected Area",
+                     iso3 = "KIR", parent_iso = "KIR", status = "Designated", status_yr = 2020,
+                     mpa_guide_lvls = "high", est_stage = "designated", LFP_score = 5, category_name = "IUCN MPA") |> 
+  st_transform(crs = st_crs(mWDPA_scenario1)) |> 
+  group_by(name, iso3, parent_iso, status, status_yr, mpa_guide_lvls, est_stage, LFP_score, category_name) |> 
+  summarize(area_km2 = as.numeric(sum(st_area(geom)/10^6))) |> 
+  ungroup() |> 
+  mutate(marine_area_km2 = area_km2, pct_marine = 99)
+  
+
+PS_MPAS <- mWDPA_scenario1 |> 
+  filter(wdpa_id %in% wdpa_PS_mpas) |> 
+  select(wdpa_id, wdpa_pid, name, iso3, parent_iso, status, status_yr, iucn_cat, area_km2, marine_area_km2, pct_marine, 
+         mpa_guide_lvls, est_stage, LFP_score, category_name) |> 
+  bind_rows(slimpa) 
+  
+sf::st_write(PS_MPAS, 
+             file.path(prj_path, "data/02_processed/PS_MPAS.gpkg"), 
+               append = FALSE)  
+
+mapview::mapview(PS_MPAS,
+                 legend = TRUE,
+                   map.types = c("Esri.WorldImagery"))
+```
+
+
