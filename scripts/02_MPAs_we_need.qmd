@@ -1,6 +1,6 @@
 ---
 title: "02_MPAS_we_need"
-format: html
+format: docx
 editor: visual
 ---
 
@@ -30,20 +30,12 @@ ocean_area <- 361000000 #km2
 prj_crs <- "EPSG:8857" # Equal Earth projection (8857)
 ```
 
-
 ```{r eval = T}
-world_eez <-  st_read(file.path(prj_path, "data/02_processed/world_EEZs.gpkg")) 
+world_eez <-  st_read(file.path(prj_path, "data/processed/world_EEZs.gpkg")) 
+land_single <- st_read(file.path(prj_path, "data/processed/land.gpkg"))
+#territorial_waters <- st_read(file.path(prj_path, "data/02_processed/world_territorial_waters.gpkg"))
 
-territorial_waters <- st_read(file.path(prj_path, "data/02_processed/world_territorial_waters_v2.gpkg"))
-
-#territorial_waters_v2 <- st_read(file.path(prj_path, "data/02_processed/world_territorial_waters_v2.gpkg"))
-
-mWDPA_with_info <- sf::st_read(file.path(prj_path, "data/02_processed/mWDPA_clean_valid_fixed_with_assessments.gpkg")) |> 
-  st_drop_geometry()
-
-mWDPA_1 <- sf::st_read(file.path(prj_path, "data/02_processed/mWDPA_scenario_1.gpkg")) |> 
-  mutate(iucn_cat = fct_relevel(iucn_cat, "Ia", "Ib", "II", "III", "IV", "V", "VI", 
-                                "Not Applicable", "Not Assigned", "Not Reported")) 
+territorial_waters <- st_read(file.path(prj_path, "data/processed/world_territorial_waters_v2.gpkg"))
 
 areas_by_mrgid <- world_eez |> 
   st_drop_geometry() |> 
@@ -57,19 +49,33 @@ areas_by_mrgid <- world_eez |>
   mutate(sovereign = countrycode::countrycode(iso_sov1, 
                                   origin = 'iso3c', destination = 'country.name')) |> 
   select(iso_sov1, sovereign, everything())
+
+global_numbers <- territorial_waters |> 
+  st_drop_geometry() |> 
+  summarize(eez_area = sum(area_km2)/10^6,
+            territorial_area = sum(area_12nm_km2)/10^6) 
 ```
 
-# Protected Areas 
+# Protected Areas
 
 ```{r, eval = T, include = T}
-mWDPA_1 <- mWDPA_1 |> 
-  mutate(wdpa_id = as.character(wdpa_id)) |>
-  left_join(mWDPA_with_info)
+#mWDPA_with_info <- sf::st_read(file.path(prj_path, "data/02_processed/mWDPA_clean_valid_fixed_with_assessments.gpkg")) |> 
+#  st_drop_geometry()
+#
+#mWDPA_1 <- sf::st_read(file.path(prj_path, "data/02_processed/mWDPA_scenario_1.gpkg")) |> 
+#  mutate(iucn_cat = fct_relevel(iucn_cat, "Ia", "Ib", "II", "III", "IV", "V", "VI", 
+#                                "Not Applicable", "Not Assigned", "Not Reported")) 
+#
+#mWDPA_1 <- mWDPA_1 |> 
+#  mutate(wdpa_id = as.character(wdpa_id)) |>
+#  left_join(mWDPA_with_info)
 
-mWDPA_1_info <- mWDPA_1 |> 
+s1_MPAs <- sf::read_sf(file.path(prj_path, "data/output/MPAs_merged.gpkg")) 
+
+s1_MPAs_info <- s1_MPAs |> 
   st_drop_geometry()
 
-mWDPA_1_totals <- mWDPA_1 |> 
+s1_MPAs_totals <- s1_MPAs_info |> 
   st_drop_geometry() |> 
   summarize(n_mpa = n_distinct(wdpa_id),
             median_size = median(marine_area_km2),
@@ -81,15 +87,15 @@ mWDPA_1_totals <- mWDPA_1 |>
 
 The public WDPA dataset was obtained in September 2024, and it was processed by first excluding terrestrial areas and Other Effective area-based Conservation Measures (OECMs). Overlapping polygons were removed, and the dataset was cleaned using the `wdpa_clean()` function from the `wdpar` R package. We also removed degazetted MPAs, such as the Phoenix Islands Protected Area (PIPA), and corrected erroneous polygons, including the Palau MPA. To ensure accuracy, any land areas (Sayre et al (2019)) were removed and the marine area (in km²) of each MPA was recalculated. To remove any noise product of the cleaning process, MPA zones smaller than 0.001 km2 and those with less than 1% of its area marine were excluded.
 
-The final dataset contains `r mWDPA_1_totals$n_mpa` MPAs, covering a total of `r round(mWDPA_1_totals$protected_area_km2/10^6)` million km², which represents `r round(mWDPA_1_totals$pct_ocean,2)`% of the ocean. The median size of these MPAs is `r round(mWDPA_1_totals$median_size,2)` km², with an average size of `r round(mWDPA_1_totals$avg_size,2)` km².
+The final dataset contains `r s1_MPAs_totals$n_mpa` MPAs, covering a total of `r round(s1_MPAs_totals$protected_area_km2/10^6)` million km², which represents `r round(s1_MPAs_totals$pct_ocean,2)`% of the ocean. The median size of these MPAs is `r round(s1_MPAs_totals$median_size,2)` km², with an average size of `r round(s1_MPAs_totals$avg_size,2)` km².
 
 ![Marine Protected Areas (MPAs) of the world. Areas classified as incompatible with conservation are shown in yellow. Source: WDPA, 2024]()
 
 Most of the MPAs are in this scenario have not been assessed by MPA Guide (n = 10316, 3% of the ocean), followed by 233 MPAs considered incompatible with conservation (2.68% of the ocean).
 
 ```{r eval = T, include = T}
-mWDPA_1_info |> 
-  group_by(mpa_guide_lvls) |>
+s1_MPAs_info |> 
+  group_by(mpa_guide_lvl) |>
   summarize(n_mpa = n_distinct(wdpa_id),
             median_size = median(marine_area_km2),
             avg_size = mean(marine_area_km2),
@@ -101,7 +107,7 @@ mWDPA_1_info |>
   gt::gt() |>
   gt::fmt_number(columns = 3:7, decimals = 2) |> 
   # rename vars
-  gt::cols_label(mpa_guide_lvls = "Protection Level",
+  gt::cols_label(mpa_guide_lvl = "Protection Level",
                  n_mpa = "# of MPAs",
                  median_size = "Median size (km2)",
                  avg_size = "Average size (km2)",
@@ -110,18 +116,18 @@ mWDPA_1_info |>
                  pct_ocean = "% of ocean")
 ```
 
-Almost 50% of the MPAs in the dataset are less than 1 km2 in size, with a global median size of `r round(mWDPA_1_totals$median_size,1)` km2.
+Almost 50% of the MPAs in the dataset are less than 1 km2 in size, with a global median size of `r round(s1_MPAs_totals$median_size,1)` km2.
 
 ```{r eval = T, include = T}
 # Lets count the number of MPAs in different bin sizes (<1, 1-10, 10-100, 100-1000, 1000-10000, >10000)
 
-mpas_by_size <- mWDPA_1_info |> 
+mpas_by_size <- s1_MPAs_info |> 
   mutate(size_bin = cut(marine_area_km2, 
                         breaks = c(0, 0.1, 0.5, 1, 10, 100, 1000, 10000, 100000,Inf), 
                         labels = c("0-0.1","0.1-0.5","0.5-1", "1-10", "10-100", "100-1000", "1000-10000", "10000", ">100000"))) |> 
   group_by(size_bin) |>
   summarize(n_mpa = n_distinct(wdpa_id),
-            pct_mpas = 100*n_mpa/n_distinct(mWDPA_1_info$wdpa_id), 
+            pct_mpas = 100*n_mpa/n_distinct(s1_MPAs_info$wdpa_id), 
             median_size = median(marine_area_km2),
             avg_size = mean(marine_area_km2),
             std_size = sd(marine_area_km2),
@@ -145,8 +151,8 @@ mpas_by_size |>
 ```
 
 ```{r eval = T, include = T, fig.width = 10, fig.height = 7}
-labels_count <- mWDPA_1_info |> 
-  group_by(mpa_guide_lvls) |>
+labels_count <- s1_MPAs_info |> 
+  group_by(mpa_guide_lvl) |>
   summarize(n_mpa = n_distinct(wdpa_id),
             median_size = median(marine_area_km2),
             avg_size = mean(marine_area_km2),
@@ -155,12 +161,12 @@ labels_count <- mWDPA_1_info |>
             pct_ocean = 100*protected_area_km2/ocean_area) |> 
   ungroup() |> 
   mutate_if(is.numeric, round, 2) |> 
-                     mutate(label = paste0(mpa_guide_lvls, " (", n_mpa, ")")) |> 
-                     select(mpa_guide_lvls, label) |> 
+                     mutate(label = paste0(mpa_guide_lvl, " (", n_mpa, ")")) |> 
+                     select(mpa_guide_lvl, label) |> 
                      deframe()
 
-(size_boxplot <- mWDPA_1_info |> 
-  ggplot(aes(x = mpa_guide_lvls, y = marine_area_km2, col = mpa_guide_lvls, fill = mpa_guide_lvls))+
+(size_boxplot <- s1_MPAs_info |> 
+  ggplot(aes(x = mpa_guide_lvl, y = marine_area_km2, col = mpa_guide_lvl, fill = mpa_guide_lvl))+
   geom_boxplot(show.legend = F, width = .2, fill = "white", size = 1, outlier.shape = NA)+
   scale_y_continuous(transform = "log10", breaks = c(0,.1,1,10,100,1000,100000))+
     scale_x_discrete(labels = labels_count)+
@@ -180,44 +186,71 @@ ggsave(file.path(prj_path, "figures/size_boxplot.pdf"), size_boxplot, width = 12
 ggsave(file.path(prj_path, "figures/size_boxplot.png"), size_boxplot, width = 12, height = 10)
 ```
 
-```{r eval = T}
-mWDPA_1_within_12nm <- st_read(file.path(prj_path, "data/02_processed/mWDPA_s1_within_12nm.gpkg"))
+## Inside 12nm
 
-mWDPA_1 <- mWDPA_1 |> 
-  left_join(st_drop_geometry(mWDPA_1_within_12nm)) |> 
+```{r, eval = F}
+territorial_waters_single <- st_union(territorial_waters)
+
+territorial_waters_single_simple <- territorial_waters_single |> 
+  st_simplify(dTolerance = 1000) |> 
+  st_buffer(dist = 3000)
+
+st_write(territorial_waters_single_simple,
+         file.path(prj_path, "data/processed/territorial_waters_single_simple.gpkg"), append = F)
+
+s1_MPAs_in_12nm <- s1_MPAs |> 
+  st_intersection(territorial_waters_single_simple) 
+
+s1_MPAs_in_12nm <- s1_MPAs_in_12nm |> 
+  st_difference(land_single)
+
+s1_MPAs_in_12nm <- s1_MPAs_in_12nm |> 
+  mutate(area_in_12nm_km2 = round(as.numeric(st_area(geom)/10^6),4))
+
+s1_MPAs <- s1_MPAs |> 
+  left_join(st_drop_geometry(s1_MPAs_in_12nm) ) |> 
   replace_na(list(area_in_12nm_km2 = 0)) |>
   mutate(pct_area_in_12nm = 100*area_in_12nm_km2/marine_area_km2)
 
-within_12nm <- st_drop_geometry(mWDPA_1)  |> 
-  filter(marine_area_km2 >= 0.001) |> 
-  mutate(in_12_nm = if_else(pct_area_in_12nm >= 90, "< 12nm", "12 - 200nm") ) |> 
-  group_by(in_12_nm) |> 
+s1_MPAs |> 
+  mutate(eez_region = if_else(pct_area_in_12nm >= 90, "< 12nm", "12 - 200nm")) |> 
+  st_write(file.path(prj_path, "data/output/s1_MPAs_with_12nm_area.gpkg"), append = F)
+```
+
+```{r eval = T, include = T}
+s1_MPAs_with_12nm <- st_read(file.path(prj_path, "data/output/s1_MPAs_with_12nm_area.gpkg"))
+
+within_12nm <- s1_MPAs_with_12nm |> 
+  st_drop_geometry() |> 
+  mutate(eez_region = if_else(pct_area_in_12nm >= 90, "< 12nm", "12 - 200nm")) |> 
+  group_by(eez_region) |> 
   summarize(n_mpas = n_distinct(wdpa_id),
-            proportion = n_mpas/n_distinct(mWDPA_1$wdpa_id),
+            proportion = n_mpas/n_distinct(s1_MPAs$wdpa_id),
             avg_size_km2 = mean(marine_area_km2), 
             median_size_km2 = median(marine_area_km2),
             protected_area_km2 = sum(marine_area_km2),
-            pct_ocean = 100*protected_area_km2/ocean_area)
+            pct_ocean = 100*protected_area_km2/ocean_area) |> 
+  mutate_if(is.numeric, round, 2)
 ```
 
-We classified MPAs as inside territorial waters if at least 90% of its total area falls within 12nm from the coast. Else, if territorial waters represented less than 10% of the MPA area, it was considered as outside (12-200nm). A total of `r within_12nm$n_mpas[within_12nm$in_12_nm == T]` MPAs (`r round(100*within_12nm$n_mpas[within_12nm$in_12_nm == T]/mWDPA_1_totals$n_mpa)` % of total) are fall within the territorial seas of countries yet they represent only `r within_12nm$pct_ocean[within_12nm$in_12_nm == T]`% of the ocean. The median size of these MPAs is `r within_12nm$median_size_km2[within_12nm$in_12_nm == T]` km². On the other hand, MPAs outside territorial waters represent `r within_12nm$pct_ocean[within_12nm$in_12_nm == F]`% of the ocean, with a median size of `r round(within_12nm$median_size_km2[within_12nm$in_12_nm == F],2)` km².
+We classified MPAs as inside territorial waters if at least 90% of its total area falls within 12nm from the coast. Else, if territorial waters represented less than 10% of the MPA area, it was considered as outside (12-200nm). A total of `r within_12nm$n_mpas[within_12nm$eez_region == "< 12nm"]` MPAs (`r round(100*within_12nm$n_mpas[within_12nm$eez_region == "< 12nm"]/s1_MPAs_totals$n_mpa)` % of total) fall within the territorial seas of countries yet they represent only `r round(within_12nm$pct_ocean[within_12nm$eez_region == "< 12nm"],2)`% of the ocean. The median size of these MPAs is `r within_12nm$median_size_km2[within_12nm$eez_region == "< 12nm"]` km². On the other hand, MPAs outside territorial waters represent `r within_12nm$pct_ocean[within_12nm$eez_region != "< 12nm"]`% of the ocean, with a median size of `r round(within_12nm$median_size_km2[within_12nm$eez_region != "< 12nm"],2)` km².
 
-```{r}
-(size_by_location <- st_drop_geometry(mWDPA_1)  |> 
-  filter(marine_area_km2 >= 0.001) |> 
-  mutate(in_12_nm = if_else(pct_area_in_12nm >= 90, "< 12nm", "12 - 200nm") ) |> 
-  ggplot(aes(x = in_12_nm, y = marine_area_km2, col = in_12_nm, fill = in_12_nm))+
-  geom_boxplot(show.legend = F, width = .2, fill = "white", size = 1, outlier.shape = NA)+
-  scale_y_continuous(transform = "log10", breaks = c(0,.1,1,10,100,1000,100000))+
-  ggdist::stat_halfeye(adjust = .33, ## bandwidth
-                       width = .67, 
-                       color = NA, ## remove slab interval
-                       position = position_nudge(x = .15),show.legend = F)+
-  geom_point(position = position_nudge(x = -.22), shape = 95, size = 3, alpha = .15, show.legend = F)+
-  ggthemes::theme_hc()+
-  labs(x = "", y = "MPA area (km2)")+
-  paletteer::scale_color_paletteer_d("futurevisions::atomic_blue", na.value = "grey")+
-  paletteer::scale_fill_paletteer_d("futurevisions::atomic_blue", na.value = "grey"))
+```{r, eval = T, include = T}
+(size_by_location <- s1_MPAs_with_12nm |> 
+   st_drop_geometry() |> 
+   mutate(eez_region = if_else(pct_area_in_12nm >= 90, "< 12nm", "12 - 200nm")) |> 
+   ggplot(aes(x = eez_region, y = marine_area_km2, col = eez_region, fill = eez_region))+
+   geom_boxplot(show.legend = F, width = .2, fill = "white", size = 1, outlier.shape = NA)+
+   scale_y_continuous(transform = "log10", breaks = c(0,.1,1,10,100,1000,100000))+
+   ggdist::stat_halfeye(adjust = .33, ## bandwidth
+                        width = .67, 
+                        color = NA, ## remove slab interval
+                        position = position_nudge(x = .15),show.legend = F)+
+   geom_point(position = position_nudge(x = -.22), shape = 95, size = 3, alpha = .15, show.legend = F)+
+   ggthemes::theme_hc()+
+   labs(x = "", y = "MPA area (km2)")+
+   paletteer::scale_color_paletteer_d("futurevisions::atomic_blue", na.value = "grey")+
+   paletteer::scale_fill_paletteer_d("futurevisions::atomic_blue", na.value = "grey"))
 
 ggsave(file.path(prj_path, "figures/S1_MPA_size_by_location.pdf"), size_by_location, width = 12, height = 10)  
 ggsave(file.path(prj_path, "figures/S1_MPA_size_by_location.png"), size_by_location, width = 12, height = 10)  
@@ -230,13 +263,19 @@ ggsave(file.path(prj_path, "figures/S1_MPA_size_by_location.png"), size_by_locat
 To calculate the percentage of each country’s EEZ and territorial seas that are protected, we first intersected the EEZ and territorial seas files with a single polygon of MPAs, created by dissolving all individual MPA polygons using the st_union function in R. We then estimated the area of the resulting intersections, representing the protected areas within each EEZ and territorial sea. These protected areas were left-joined with the corresponding EEZ and territorial seas files, and the percentage of protection was calculated relative to the total area of each EEZ and territorial sea.
 
 ```{r eval = F}
-protected_poly_s1 <- st_read(file.path(prj_path, "data/02_processed/s1_protected_poly.gpkg"))
+protected_poly_s1 <- st_read(file.path(prj_path, "data/output/s1_MPAs_single_no_land.shp"))
 
 #### % EEZ protected 
 
 eez_protected_s1 <- world_eez |> 
   st_intersection(protected_poly_s1) |> 
   mutate(area_mpa_km2 = as.numeric(st_area(geom)/10^6)) 
+
+protected_eez_km2 <- sum(eez_protected_s1$area_mpa_km2)
+
+global_numbers$eez_mpa_km2 <- protected_eez_km2/10^6
+
+global_numbers$pct_eez_mpa <- round(100*(protected_eez_km2/10^6)/global_numbers$eez_area, 2)
 
 results_by_mrgid_s1 <- areas_by_mrgid |> 
   filter(!is.na(area_12nm_km2)) |> 
@@ -252,6 +291,12 @@ results_by_mrgid_s1 <- areas_by_mrgid |>
 territorial_waters_protected_s1 <- territorial_waters |> 
   st_intersection(protected_poly_s1) |> 
   mutate(area_mpa_km2 = as.numeric(st_area(geom)/10^6))
+
+protected_12nm_km2 <- sum(territorial_waters_protected_s1$area_mpa_km2)
+
+global_numbers$territorial_mpa_km2 <- protected_12nm_km2/10^6
+
+global_numbers$pct_territorial_mpa <- round(100*global_numbers$territorial_mpa_km2/global_numbers$territorial_area, 2)
 
 results_by_mrgid_s1 <- results_by_mrgid_s1 |> 
   left_join(territorial_waters_protected_s1 |> 
@@ -298,14 +343,14 @@ results_by_iso_s1 |>
   summarise(sum(n_large_mpas_needed, na.rm = T),
             sum(n_small_mpas_needed, na.rm = T)) 
 
-write_csv(results_by_iso_s1, file.path(prj_path, "data/03_output/S1_results_by_iso.csv"))
+write_csv(results_by_iso_s1, file.path(prj_path, "data/output/S1_results_by_iso.csv"))
 
 world_eez |> 
   left_join(results_by_mrgid_s1 |> 
               select(mrgid, area_12nm_km2, area_mpa_km2),
             by = "mrgid") |> 
   mutate(pct_eez_protected = round(100*area_mpa_km2/area_km2, 2)) |> 
-  st_write(file.path(prj_path, "data/03_output/S1_world_eez_with_results.gpkg"), 
+  st_write(file.path(prj_path, "data/output/S1_EEZs_with_results.gpkg"), 
            append = F)
 
 territorial_waters |> 
@@ -313,7 +358,7 @@ territorial_waters |>
               select(mrgid, area_mpa_km2, area_12nm_mpa_km2),
             by = "mrgid") |> 
   mutate(pct_12nm_protected = round(100*area_12nm_mpa_km2/area_12nm_km2, 2)) |> 
-  st_write(file.path(prj_path, "data/03_output/S1_territorial_waters_with_results.gpkg"), append = F)
+  st_write(file.path(prj_path, "data/output/S1_12nm_with_results.gpkg"), append = F)
 
 eez_by_iso <- world_eez |> 
   group_by(iso_sov1) |>
@@ -322,13 +367,13 @@ eez_by_iso <- world_eez |>
 
 eez_by_iso |> 
   left_join(results_by_iso_s1) |> 
-  st_write(file.path(prj_path, "data/03_output/S1_sov_eez_with_results.gpkg"), append = F)
+  st_write(file.path(prj_path, "data/output/S1_sov_iso3_with_results.gpkg"), append = F)
 ```
 
 To date, 12 sovereign nations have reached or exceed the 30% protection goals. These are:
 
 ```{r eval = T, include = T}
-results_by_iso_s1 <- read_csv(file.path(prj_path, "data/03_output/S1_results_by_iso.csv"))
+results_by_iso_s1 <- read_csv(file.path(prj_path, "data/output/S1_results_by_iso.csv"))
 
 results_by_iso_s1 <- results_by_iso_s1 |> 
   mutate(country = countrycode::countrycode(iso_sov1, 
@@ -354,6 +399,9 @@ results_by_iso_s1 |>
                  pct_eez_protected = "EEZ protected (%)",
                  area_12nm_km2 = "Territorial waters (km2)",
                  pct_12nm_protected = "Territorial waters protected (%)")
+
+#sum(results_by_iso_s1$area_mpa_km2)/sum(results_by_iso_s1$area_eez_km2)
+#sum(results_by_iso_s1$area_12nm_mpa_km2)/sum(results_by_iso_s1$area_12nm_km2)
 ```
 
 ![Protection of the world's territorial waters. Each nation's territorial waters is split into its corresponding IHO areas and the % protection is calculated for each zone](images/S1_12nm_by_percent_protection.png)
@@ -459,7 +507,7 @@ results_by_iso_s1 |>
 ### No incompatible protection
 
 ```{r eval = F}
-protected_poly_s2 <- st_read(file.path(prj_path, "data/02_processed/s2_protected_poly.gpkg"))
+protected_poly_s2 <- st_read(file.path(prj_path, "data/output/s2_MPAs_single.gpkg"))
 
 #### % EEZ protected 
 
@@ -527,14 +575,14 @@ results_by_iso_s2 |>
   summarise(sum(n_large_mpas_needed, na.rm = T),
             sum(n_small_mpas_needed, na.rm = T)) 
 
-write_csv(results_by_iso_s2, file.path(prj_path, "data/03_output/S2_results_by_iso.csv"))
+write_csv(results_by_iso_s2, file.path(prj_path, "data/output/S2_results_by_iso.csv"))
 
 world_eez |> 
   left_join(results_by_mrgid_s2 |> 
               select(mrgid, area_12nm_km2, area_mpa_km2),
             by = "mrgid") |> 
   mutate(pct_eez_protected = round(100*area_mpa_km2/area_km2, 2)) |> 
-  st_write(file.path(prj_path, "data/03_output/S2_world_eez_with_results.gpkg"), 
+  st_write(file.path(prj_path, "data/output/S2_EEZ_with_results.gpkg"), 
            append = F)
 
 territorial_waters |> 
@@ -542,7 +590,7 @@ territorial_waters |>
               select(mrgid, area_mpa_km2, area_12nm_mpa_km2),
             by = "mrgid") |> 
   mutate(pct_12nm_protected = round(100*area_12nm_mpa_km2/area_12nm_km2, 2)) |> 
-  st_write(file.path(prj_path, "data/03_output/S2_territorial_waters_with_results.gpkg"), append = F)
+  st_write(file.path(prj_path, "data/output/S2_12nm_with_results.gpkg"), append = F)
 
 eez_by_iso <- world_eez |> 
   group_by(iso_sov1) |>
@@ -551,13 +599,16 @@ eez_by_iso <- world_eez |>
 
 eez_by_iso |> 
   left_join(results_by_iso_s2) |> 
-  st_write(file.path(prj_path, "data/03_output/S2_sov_eez_with_results.gpkg"), append = F)
+  st_write(file.path(prj_path, "data/output/S2_sov_iso3_with_results.gpkg"), append = F)
+
+sum(results_by_iso_s2$area_mpa_km2)/sum(results_by_iso_s2$area_eez_km2)
+sum(results_by_iso_s2$area_12nm_mpa_km2)/sum(results_by_iso_s2$area_12nm_km2)
 ```
 
 ### Most effective protection
 
 ```{r eval = F}
-protected_poly_s3 <- st_read(file.path(prj_path, "data/02_processed/s3_protected_poly.gpkg"))
+protected_poly_s3 <- st_read(file.path(prj_path, "data/output/s3_MPAs_single.gpkg"))
 
 #### % EEZ protected 
 
