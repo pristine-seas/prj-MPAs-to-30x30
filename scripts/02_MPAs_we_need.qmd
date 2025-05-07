@@ -95,6 +95,16 @@ s1_MPAs_totals <- s1_MPAs_info |>
             std_size = sd(marine_area_km2),
             protected_area_km2 = sum(marine_area_km2),
             pct_ocean = 100*protected_area_km2/ocean_area)
+
+
+s1_MPAs_info |> 
+  filter(sovereign == "ESP") |> 
+  group_by(mpa_guide_lvl) |>
+  summarize(n_mpa = n_distinct(wdpa_id),
+            median_size = median(marine_area_km2),
+            avg_size = mean(marine_area_km2),
+            std_size = sd(marine_area_km2),
+            protected_area_km2 = sum(marine_area_km2)) 
 ```
 
 The public WDPA dataset was obtained in September 2024, and it was processed by first excluding terrestrial areas and Other Effective area-based Conservation Measures (OECMs). Overlapping polygons were removed, and the dataset was cleaned using the `wdpa_clean()` function from the `wdpar` R package. We also removed degazetted MPAs, such as the Phoenix Islands Protected Area (PIPA), and corrected erroneous polygons, including the Palau MPA. To ensure accuracy, any land areas (Sayre et al (2019)) were removed and the marine area (in km²) of each MPA was recalculated. To remove any noise product of the cleaning process, MPA zones smaller than 0.001 km2 and those with less than 1% of its area marine were excluded.
@@ -442,7 +452,6 @@ results_by_iso_s1 |>
 To estimate the number of MPAs required to achieve 30% protection, we first aggregated the protected area coverage by sovereign states, as they are the entities committed to the 30x30 target, rather than individual territories or sections of the EEZ. For sovereign nations with less than 30% of their EEZ currently protected, we determined the area needed to reach 30% protection of both their territorial seas and the 12-200 nautical mile portion of their EEZ. The required area was then divided by the assumed size of new MPAs: 10 km² for territorial waters and 100,000 km² for the 12-200 nautical mile zone. For nations already meeting or exceeding the 30% target, the number of additional MPAs needed was set to zero.
 
 We find that we need to create `r sum(results_by_iso_s1$n_large_mpas_needed, na.rm = T)` large MPAs and `r sum(results_by_iso_s1$n_small_mpas_needed, na.rm = T)` small MPAs to reach the 30% target by 2023. The total area needed to reach the 30% target is `r round(sum(results_by_iso_s1$area_needed/10^6, na.rm = T))` million km².
-
 
 ```{r eval = T, include = T}
 results_by_iso_s1 |> 
