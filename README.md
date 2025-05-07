@@ -5,15 +5,15 @@ This repository contains the analysis for *Rechberger et al. (in review)*, *A Pa
 ## 📂 Repository Structure
 
 - `01_MPAs_we_have.qmd` - Analysis of current MPA coverage in coastal waters.
-- `01_MPAs_we_need.qmd` - Projections for the number of MPAs needed to achieve 30% protection.
+- `01_MPAs_we_need.qmd` - Calculation of the number of MPAs needed to achieve 30% protection.
 
-## 🌎 Data Sources
+## 🗺️ Data Sources
 
 - **EEZ and Territorial Waters:** Flanders Marine Institute (2023), Maritime Boundaries Geodatabase, Version 12.
 - **Global Shoreline:** Sayre et al. (2019).
 - **MPAs:** World Database on Protected Areas (WDPA, September 2024), Protected Seas (2024), Pike et al (2024) - MPA Guide, Aminian-Biquet et al (2024)
 
-## 📌 Citation
+## 📚 Citation
 
 Please cite the original manuscript for full details:
 
